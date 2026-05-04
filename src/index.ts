@@ -1,154 +1,13 @@
-/*
-index.ts
-This is the main file for the Auth Inbox Email Worker.
-created by: github@TooonyChen
-created on: 2024 Oct 07
-Last updated: 2024 Oct 07
-*/
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { RPCEmailMessage } from "./rpcEmail";
 
 import indexHtml from "./index.html";
-
-type ApiFormat = "openai" | "responses" | "anthropic";
-
-interface ProviderConfig {
-  baseUrl: string;
-  apiKey: string;
-  format: ApiFormat;
-  model: string;
-}
 
 interface Env {
   DB: D1Database;
   ASSETS?: Fetcher;
   FrontEndAdminID: string;
   FrontEndAdminPassword: string;
-  UseBark: string;
-  barkTokens: string;
-  barkUrl: string;
-  // Primary AI provider
-  AI_BASE_URL: string;
-  AI_API_KEY: string;
-  AI_API_FORMAT: ApiFormat;
-  AI_MODEL: string;
-  // Fallback AI provider (all four must be set to enable fallback)
-  AI_FALLBACK_BASE_URL?: string;
-  AI_FALLBACK_API_KEY?: string;
-  AI_FALLBACK_API_FORMAT?: ApiFormat;
-  AI_FALLBACK_MODEL?: string;
-}
-
-// Normalize model output into JSON text // 将模型输出规范化为可解析的 JSON 文本
-function extractJsonFromText(rawText: string): Record<string, unknown> | null {
-  let candidate = rawText.trim();
-  const jsonMatch = candidate.match(/```json\s*([\s\S]*?)\s*```/);
-  if (jsonMatch && jsonMatch[1]) {
-    candidate = jsonMatch[1].trim();
-    console.log(`Extracted JSON Text: "${candidate}"`);
-  } else {
-    console.log(`Assuming entire text is JSON: "${candidate}"`);
-  }
-
-  try {
-    return JSON.parse(candidate);
-  } catch (parseError) {
-    console.error("JSON parsing error:", parseError);
-    console.log(`Problematic JSON Text: "${candidate}"`);
-    return null;
-  }
-}
-
-// Remove trailing slashes to avoid double separators // 移除结尾斜杠防止重复拼接
-function normaliseBaseUrl(baseUrl: string): string {
-  return baseUrl.replace(/\/+$/, "");
-}
-
-// Unified AI provider caller supporting openai / responses / anthropic formats
-async function callProvider(config: ProviderConfig, prompt: string): Promise<string | null> {
-  const base = normaliseBaseUrl(config.baseUrl);
-  let endpoint: string;
-  let body: unknown;
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-
-  if (config.format === "openai") {
-    endpoint = `${base}/v1/chat/completions`;
-    headers["Authorization"] = `Bearer ${config.apiKey}`;
-    body = {
-      model: config.model,
-      temperature: 0,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: "You return only valid JSON that matches the requested schema." },
-        { role: "user", content: prompt },
-      ],
-    };
-  } else if (config.format === "responses") {
-    endpoint = `${base}/v1/responses`;
-    headers["Authorization"] = `Bearer ${config.apiKey}`;
-    body = {
-      model: config.model,
-      input: [{ role: "user", content: prompt }],
-      text: { format: { type: "json_object" } },
-    };
-  } else {
-    // anthropic
-    endpoint = `${base}/v1/messages`;
-    headers["x-api-key"] = config.apiKey;
-    headers["anthropic-version"] = "2023-06-01";
-    body = {
-      model: config.model,
-      max_tokens: 1024,
-      messages: [{ role: "user", content: prompt }],
-    };
-  }
-
-  let response: Response;
-  try {
-    response = await fetch(endpoint, { method: "POST", headers, body: JSON.stringify(body) });
-  } catch (err) {
-    console.error(`[callProvider:${config.format}] fetch error:`, err);
-    return null;
-  }
-
-  if (!response.ok) {
-    console.error(`[callProvider:${config.format}] HTTP ${response.status} ${response.statusText}`);
-    return null;
-  }
-
-  let payload: unknown;
-  try {
-    payload = await response.json();
-  } catch {
-    console.error(`[callProvider:${config.format}] failed to parse JSON response`);
-    return null;
-  }
-
-  // Extract text from response based on format
-  if (config.format === "openai") {
-    const content = (payload as any)?.choices?.[0]?.message?.content;
-    if (typeof content === "string") return content;
-    if (Array.isArray(content)) {
-      const part = content.find((p: any) => p?.type === "text" && typeof p.text === "string");
-      return part?.text ?? null;
-    }
-    console.error("[callProvider:openai] unexpected response shape");
-    return null;
-  }
-
-  if (config.format === "responses") {
-    const text = (payload as any)?.output?.[0]?.content?.[0]?.text
-      ?? (payload as any)?.output?.[0]?.text;
-    if (typeof text === "string") return text;
-    console.error("[callProvider:responses] unexpected response shape");
-    return null;
-  }
-
-  // anthropic
-  const text = (payload as any)?.content?.[0]?.text;
-  if (typeof text === "string") return text;
-  console.error("[callProvider:anthropic] unexpected response shape");
-  return null;
 }
 
 function jsonResponse(data: unknown, status = 200): Response {
@@ -175,33 +34,7 @@ function stripHtmlTags(text: string): string {
     .trim();
 }
 
-function isPromotionalEmail(headers: Headers, rawEmail: string): boolean {
-  // Bulk/marketing emails are legally required to carry these headers (CAN-SPAM, RFC 2369)
-  if (headers.get("List-Unsubscribe") || headers.get("List-ID") || headers.get("List-Post")) {
-    return true;
-  }
-
-  const precedence = headers.get("Precedence")?.toLowerCase() ?? "";
-  if (precedence === "bulk" || precedence === "list") {
-    return true;
-  }
-
-  // Check raw headers section for campaign/bulk markers from known ESPs
-  const rawHeaders = rawEmail.slice(0, rawEmail.search(/\r?\n\r?\n/) + 1 || 4000);
-  if (
-    /^X-Campaign(-ID)?:/im.test(rawHeaders) ||
-    /^X-Mailer:\s*(mailchimp|sendgrid|klaviyo|brevo|sendinblue|constant.contact|hubspot)/im.test(rawHeaders) ||
-    /^X-SFMC-Stack:/im.test(rawHeaders) ||
-    /^X-Marketo-/im.test(rawHeaders)
-  ) {
-    return true;
-  }
-
-  return false;
-}
-
 function extractMailBodies(rawEmail: string): { textBody: string | null; htmlBody: string | null } {
-  // Try MIME multipart parsing first
   const boundaryMatch = rawEmail.match(/boundary="?([^"\r\n;]+)"?/i);
   if (boundaryMatch) {
     const boundary = boundaryMatch[1].trim();
@@ -249,7 +82,6 @@ function extractMailBodies(rawEmail: string): { textBody: string | null; htmlBod
     }
   }
 
-  // Fallback: no MIME boundary, try regex approach
   const htmlMatch = rawEmail.match(/<html[\s\S]*<\/html>/i) ?? rawEmail.match(/<body[\s\S]*<\/body>/i);
   const htmlBody = htmlMatch ? decodeQuotedPrintable(htmlMatch[0]).trim() : null;
 
@@ -264,22 +96,9 @@ function extractMailBodies(rawEmail: string): { textBody: string | null; htmlBod
 export default class extends WorkerEntrypoint<Env> {
   async fetch(request: Request): Promise<Response> {
     const env: Env = this.env;
-    const FrontEndAdminID = env.FrontEndAdminID;
-    const FrontEndAdminPassword = env.FrontEndAdminPassword;
-
-    // Basic-auth gate for the admin console // 使用 Basic Auth 保护管理界面
     const authHeader = request.headers.get("Authorization");
 
-    if (!authHeader) {
-      return new Response("Unauthorized", {
-        status: 401,
-        headers: {
-          "WWW-Authenticate": "Basic realm=\"User Visible Realm\"",
-        },
-      });
-    }
-
-    if (!authHeader.startsWith("Basic ")) {
+    if (!authHeader?.startsWith("Basic ")) {
       return new Response("Unauthorized", {
         status: 401,
         headers: {
@@ -292,7 +111,7 @@ export default class extends WorkerEntrypoint<Env> {
     const decodedCredentials = atob(base64Credentials);
     const [username, password] = decodedCredentials.split(":");
 
-    if (username !== FrontEndAdminID || password !== FrontEndAdminPassword) {
+    if (username !== env.FrontEndAdminID || password !== env.FrontEndAdminPassword) {
       return new Response("Unauthorized", {
         status: 401,
         headers: {
@@ -310,25 +129,24 @@ export default class extends WorkerEntrypoint<Env> {
       const { results } = await env.DB.prepare(
         `
           SELECT
-            c.id,
-            c.message_id AS messageId,
-            c.from_org AS fromOrg,
-            c.from_addr AS fromAddr,
-            c.to_addr AS toAddr,
-            c.topic,
-            c.code,
-            c.created_at AS createdAt,
-            r.subject
-          FROM code_mails c
-          LEFT JOIN raw_mails r ON r.message_id = c.message_id
-          ORDER BY c.created_at DESC
+            id,
+            message_id AS messageId,
+            NULL AS fromOrg,
+            from_addr AS fromAddr,
+            to_addr AS toAddr,
+            subject AS topic,
+            NULL AS code,
+            created_at AS createdAt,
+            subject
+          FROM raw_mails
+          ORDER BY created_at DESC
           LIMIT ? OFFSET ?
         `
       )
         .bind(pageSize, offset)
         .all();
 
-      const totalResult = await env.DB.prepare("SELECT COUNT(*) AS total FROM code_mails").first<{ total: number }>();
+      const totalResult = await env.DB.prepare("SELECT COUNT(*) AS total FROM raw_mails").first<{ total: number }>();
       return jsonResponse({
         page,
         pageSize,
@@ -343,19 +161,18 @@ export default class extends WorkerEntrypoint<Env> {
       const row = await env.DB.prepare(
         `
           SELECT
-            c.id,
-            c.message_id AS messageId,
-            c.from_org AS fromOrg,
-            c.from_addr AS fromAddr,
-            c.to_addr AS toAddr,
-            c.topic,
-            c.code,
-            c.created_at AS createdAt,
-            r.subject,
-            r.raw
-          FROM code_mails c
-          LEFT JOIN raw_mails r ON r.message_id = c.message_id
-          WHERE c.id = ?
+            id,
+            message_id AS messageId,
+            NULL AS fromOrg,
+            from_addr AS fromAddr,
+            to_addr AS toAddr,
+            subject AS topic,
+            NULL AS code,
+            created_at AS createdAt,
+            subject,
+            raw
+          FROM raw_mails
+          WHERE id = ?
           LIMIT 1
         `
       )
@@ -404,29 +221,16 @@ export default class extends WorkerEntrypoint<Env> {
 
     try {
       const { results } = await env.DB.prepare(
-        "SELECT from_org, to_addr, topic, code, created_at FROM code_mails ORDER BY created_at DESC"
+        "SELECT from_addr, to_addr, subject, created_at FROM raw_mails ORDER BY created_at DESC"
       ).all();
 
       let dataHtml = "";
       for (const row of results) {
-        const codeLinkParts = row.code.split(",");
-        let codeLinkContent;
-
-        if (codeLinkParts.length > 1) {
-          const [code, link] = codeLinkParts;
-          codeLinkContent = `${code}<br><a href="${link}" target="_blank">${row.topic}</a>`;
-        } else if (row.code.startsWith("http")) {
-          codeLinkContent = `<a href="${row.code}" target="_blank">${row.topic}</a>`;
-        } else {
-          codeLinkContent = row.code;
-        }
-
         dataHtml += `<tr>
-                    <td>${row.from_org}</td>
-                    <td>${row.to_addr}</td>
-                    <td>${row.topic}</td>
-                    <td>${codeLinkContent}</td>
-                    <td>${row.created_at}</td>
+                    <td>${row.from_addr ?? ""}</td>
+                    <td>${row.to_addr ?? ""}</td>
+                    <td>${row.subject ?? ""}</td>
+                    <td>${row.created_at ?? ""}</td>
                 </tr>`;
       }
 
@@ -437,8 +241,7 @@ export default class extends WorkerEntrypoint<Env> {
                     <tr>
                         <th>From</th>
                         <th>To</th>
-                        <th>Topic</th>
-                        <th>Code/Link</th>
+                        <th>Subject</th>
                         <th>Receive Time (GMT)</th>
                     </tr>
                 `
@@ -456,37 +259,15 @@ export default class extends WorkerEntrypoint<Env> {
     }
   }
 
-  // Primary email handler // 主要邮件处理入口
   async email(message: ForwardableEmailMessage): Promise<void> {
     const env: Env = this.env;
-    const useBark = env.UseBark.toLowerCase() === "true";
-
-    const primary: ProviderConfig = {
-      baseUrl: env.AI_BASE_URL,
-      apiKey: env.AI_API_KEY,
-      format: env.AI_API_FORMAT ?? "openai",
-      model: env.AI_MODEL,
-    };
-
-    const fallback: ProviderConfig | null =
-      env.AI_FALLBACK_BASE_URL && env.AI_FALLBACK_API_KEY && env.AI_FALLBACK_MODEL
-        ? {
-            baseUrl: env.AI_FALLBACK_BASE_URL,
-            apiKey: env.AI_FALLBACK_API_KEY,
-            format: env.AI_FALLBACK_API_FORMAT ?? "openai",
-            model: env.AI_FALLBACK_MODEL,
-          }
-        : null;
-
-    // Pull raw email content // 获取原始邮件内容
     const rawEmail =
       message instanceof RPCEmailMessage
         ? (message as RPCEmailMessage).rawEmail
         : await new Response(message.raw).text();
-    const messageId = message.headers.get("Message-ID");
+    const messageId = message.headers.get("Message-ID") ?? crypto.randomUUID();
     const rawSubject = message.headers.get("Subject");
 
-    // Persist raw mail payload for auditing // 将原始邮件持久化以便审计
     const { success } = await env.DB.prepare(
       "INSERT INTO raw_mails (from_addr, to_addr, subject, raw, message_id) VALUES (?, ?, ?, ?, ?)"
     )
@@ -496,148 +277,13 @@ export default class extends WorkerEntrypoint<Env> {
     if (!success) {
       message.setReject(`Failed to save message from ${message.from} to ${message.to}`);
       console.log(`Failed to save message from ${message.from} to ${message.to}`);
-    }
-
-    // Skip promotional/bulk emails before hitting the LLM
-    if (isPromotionalEmail(message.headers, rawEmail)) {
-      console.log(`Skipping promotional email from ${message.from}: ${rawSubject}`);
       return;
     }
 
-    // Prompt instructs model how to format extraction // 提示词说明提取格式和字段要求
-    const aiPrompt = `
-  Email content: ${rawEmail}.
-
-  Please read the email and extract the following information:
-  1. Code/Link/Password from the email (if available).
-  2. Organization name (title) from which the email is sent.
-  3. A brief summary of the email's topic (e.g., 'line register verification').
-
-  Please provide the following information in JSON format:
-  {
-    "title": "The organization or company that sent the verification code (e.g., 'Netflix')",
-    "code": "The extracted verification code, link, or password (e.g., '123456' or 'https://example.com/verify?code=123456')",
-    "topic": "A brief summary of the email's topic (e.g., 'line register verification')",
-    "codeExist": 1
+    console.log(`Saved raw email from ${message.from} to ${message.to}: ${rawSubject}`);
   }
 
-
-  If both a code and a link are present, include both in the 'code' field like this:
-  "code": "code, link"
-
-  If there is no code, clickable link, or this is an advertisement email, return:
-  {
-    "codeExist": 0
-  }
-`;
-
-    try {
-      const maxRetries = 3;
-      let extractedData: Record<string, unknown> | null = null;
-
-      // Primary provider: up to 3 attempts
-      for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        console.log(`[primary:${primary.format}] attempt ${attempt}`);
-        const text = await callProvider(primary, aiPrompt);
-        if (text) {
-          const parsed = extractJsonFromText(text);
-          if (parsed) {
-            extractedData = parsed;
-            console.log("[primary] extracted data:", extractedData);
-            break;
-          }
-        }
-        if (attempt < maxRetries) console.log("[primary] retrying...");
-        else console.error("[primary] max retries reached");
-      }
-
-      // Fallback provider: one attempt if primary produced nothing and fallback is configured
-      if (!extractedData && fallback) {
-        console.log(`[fallback:${fallback.format}] attempting`);
-        const text = await callProvider(fallback, aiPrompt);
-        if (text) {
-          const parsed = extractJsonFromText(text);
-          if (parsed) {
-            extractedData = parsed;
-            console.log("[fallback] extracted data:", extractedData);
-          } else {
-            console.error("[fallback] failed to parse response");
-          }
-        } else {
-          console.error("[fallback] provider returned nothing");
-        }
-      } else if (!extractedData) {
-        console.error("[primary] failed and no fallback configured");
-      }
-
-      if (extractedData) {
-        // Only persist when a code exists // 仅在存在验证码时写入数据库
-        if ((extractedData as any).codeExist === 1) {
-          const title = (extractedData as any).title || "Unknown Organization";
-          const code = (extractedData as any).code || "No Code Found";
-          const topic = (extractedData as any).topic || "No Topic Found";
-
-          // Store parsed metadata for UI display // 保存解析结果供前端展示
-          const { success: codeMailSuccess } = await env.DB.prepare(
-            "INSERT INTO code_mails (from_addr, from_org, to_addr, code, topic, message_id) VALUES (?, ?, ?, ?, ?, ?)"
-          )
-            .bind(message.from, title, message.to, code, topic, messageId)
-            .run();
-
-          if (!codeMailSuccess) {
-            message.setReject(
-              `Failed to save extracted code for message from ${message.from} to ${message.to}`
-            );
-            console.log(
-              `Failed to save extracted code for message from ${message.from} to ${message.to}`
-            );
-          }
-
-          if (useBark) {
-            // Fan-out Bark notifications for each token // 为每个 token 发送 Bark 推送
-            const barkUrl = env.barkUrl;
-            const barkTokens = env.barkTokens
-              .replace(/^\[|\]$/g, "")
-              .split(",")
-              .map((token) => token.trim());
-
-            const barkUrlEncodedTitle = encodeURIComponent(title);
-            const barkUrlEncodedCode = encodeURIComponent(code);
-
-            for (const token of barkTokens) {
-              const barkRequestUrl = `${barkUrl}/${token}/${barkUrlEncodedTitle}/${barkUrlEncodedCode}`;
-
-              const barkResponse = await fetch(barkRequestUrl, {
-                method: "GET",
-              });
-
-              if (barkResponse.ok) {
-                console.log(
-                  `Successfully sent notification to Bark for token ${token} for message from ${message.from} to ${message.to}`
-                );
-                const responseData = await barkResponse.json();
-                console.log("Bark response:", responseData);
-              } else {
-                console.error(
-                  `Failed to send notification to Bark for token ${token}: ${barkResponse.status} ${barkResponse.statusText}`
-                );
-              }
-            }
-          }
-        } else {
-          console.log("No code found in this email, skipping Bark notification.");
-        }
-      } else {
-        console.error("Failed to extract data from AI response after retries.");
-      }
-    } catch (e) {
-      console.error("Error calling AI or saving to database:", e);
-    }
-  }
-
-  // Expose RPC helper for other workers // 暴露 RPC 接口供其他 Worker 调用
   async rpcEmail(requestBody: string): Promise<void> {
-    console.log(`Received RPC email , request body: ${requestBody}`);
     const bodyObject = JSON.parse(requestBody);
     const headersObject = bodyObject.headers;
     const headers = new Headers(headersObject);
