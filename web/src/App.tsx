@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import DOMPurify from 'dompurify';
-import { Copy, Inbox, RefreshCw, ShieldCheck } from 'lucide-react';
-import { toast, Toaster } from 'sonner';
+import { Inbox, RefreshCw, ShieldCheck } from 'lucide-react';
 import { Badge } from './components/ui/badge';
 import { Button } from './components/ui/button';
 import { Card, CardHeader, CardTitle } from './components/ui/card';
@@ -9,7 +8,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs';
 import { cn } from './lib/utils';
 
 const PAGE_SIZE = 20;
-
 interface MailListItem {
 	id: number;
 	messageId: string | null;
@@ -50,17 +48,6 @@ function formatDate(value: string | null): string {
 	}
 	const date = new Date(value);
 	return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
-}
-
-function codeAndLink(value: string | null): { code: string | null; link: string | null } {
-	if (!value) return { code: null, link: null };
-	const urlMatch = value.match(/https?:\/\/\S+/);
-	if (urlMatch) {
-		const link = urlMatch[0];
-		const beforeUrl = value.slice(0, urlMatch.index).replace(/,\s*$/, '').trim();
-		return { code: beforeUrl || null, link };
-	}
-	return { code: value.trim() || null, link: null };
 }
 
 function toPreviewHtml(htmlBody: string, hideRemoteImages: boolean): string {
@@ -178,7 +165,6 @@ function App(): JSX.Element {
 
 	return (
 		<div className="min-h-screen bg-background text-slate-100">
-			<Toaster theme="dark" position="bottom-right" closeButton />
 			<div className="pointer-events-none fixed inset-0 bg-[radial-gradient(1200px_500px_at_10%_0%,rgba(95,224,192,0.08),transparent)]" />
 			<main className="relative mx-auto w-full max-w-[1300px] px-4 pb-8 pt-6 lg:px-8">
 				<header className="mb-6 flex flex-wrap items-end justify-between gap-4">
@@ -235,7 +221,7 @@ function App(): JSX.Element {
 										) : list.items.length === 0 ? (
 											<tr>
 												<td colSpan={4} className="px-3 py-8 text-center text-muted-foreground">
-													No extracted mails available.
+													No mails available.
 												</td>
 											</tr>
 										) : (
@@ -297,54 +283,11 @@ function App(): JSX.Element {
 									<div><span className="text-muted-foreground">Received:</span> {formatDate(detail.createdAt)}</div>
 								</div>
 
-								<Tabs defaultValue="parsed">
+								<Tabs defaultValue="rendered">
 									<TabsList>
-										<TabsTrigger value="parsed">Extracted</TabsTrigger>
-										<TabsTrigger value="raw">Raw Email</TabsTrigger>
-										<TabsTrigger value="rendered">Rendered</TabsTrigger>
+										<TabsTrigger value="rendered">Body</TabsTrigger>
+										<TabsTrigger value="raw">Source</TabsTrigger>
 									</TabsList>
-
-									<TabsContent value="parsed">
-										<div className="space-y-3 rounded-lg border border-border/80 bg-[#111111] p-4 text-sm text-slate-200">
-											<div><span className="text-muted-foreground">Topic:</span> {detail.topic || '-'}</div>
-											{(() => {
-												const parsedCode = codeAndLink(detail.code);
-												return (
-													<>
-														<div className="flex items-center gap-2">
-												<span className="text-muted-foreground">Code:</span>
-												{parsedCode.code ? (
-													parsedCode.code.startsWith('http') ? (
-														<Button variant="outline" size="sm" className="h-7 gap-1.5 text-xs" onClick={() => { navigator.clipboard.writeText(parsedCode.code!); toast.success('Code copied'); }}>
-															<Copy className="h-3 w-3" />Copy code
-														</Button>
-													) : (
-														<span className="font-mono font-semibold text-primary">{parsedCode.code}</span>
-													)
-												) : '-'}
-											</div>
-														<div className="flex items-center gap-2">
-															<span className="text-muted-foreground">Link:</span>
-															{parsedCode.link ? (
-																<Button
-																	variant="outline"
-																	size="sm"
-																	className="h-7 gap-1.5 text-xs"
-																	onClick={() => {
-																		navigator.clipboard.writeText(parsedCode.link!);
-																		toast.success('Link copied');
-																	}}
-																>
-																	<Copy className="h-3 w-3" />
-																	Copy link
-																</Button>
-															) : '-'}
-														</div>
-													</>
-												);
-											})()}
-										</div>
-									</TabsContent>
 
 									<TabsContent value="raw">
 										<pre className="max-h-[420px] overflow-auto rounded-lg border border-border/80 bg-[#0a0a0a] p-4 font-mono text-xs leading-6 text-slate-300">
@@ -354,7 +297,7 @@ function App(): JSX.Element {
 
 									<TabsContent value="rendered">
 										<div className="mb-3 flex items-center justify-between gap-2 text-xs text-muted-foreground">
-											<div>HTML is sanitized before preview and loaded in a sandboxed iframe.</div>
+											<div>HTML is sanitized before preview. Plain text is shown when no HTML body exists.</div>
 											<label className="inline-flex cursor-pointer items-center gap-2">
 												<input
 													type="checkbox"
