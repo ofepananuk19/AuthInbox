@@ -19,10 +19,71 @@ function jsonResponse(data: unknown, status = 200): Response {
   });
 }
 
-function decodeQuotedPrintable(text: string): string {
-  return text
-    .replace(/=\r?\n/g, "")
-    .replace(/=([A-Fa-f0-9]{2})/g, (_match, hex) => String.fromCharCode(Number.parseInt(hex, 16)));
+function decodeBytes(bytes: Uint8Array, charset = "utf-8"): string {
+  const normalized = charset.trim().toLowerCase();
+  const label =
+    normalized === "gb2312" || normalized === "gbk" || normalized === "gb18030"
+      ? "gb18030"
+      : normalized || "utf-8";
+
+  try {
+    return new TextDecoder(label).decode(bytes);
+  } catch {
+    return new TextDecoder("utf-8").decode(bytes);
+  }
+}
+
+function base64ToBytes(text: string): Uint8Array {
+  const binary = atob(text.replace(/\s/g, ""));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index++) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+function quotedPrintableToBytes(text: string): Uint8Array {
+  const normalized = text.replace(/=\r?\n/g, "");
+  const bytes: number[] = [];
+
+  for (let index = 0; index < normalized.length; index++) {
+    const char = normalized[index];
+    const hex = normalized.slice(index + 1, index + 3);
+    if (char === "=" && /^[A-Fa-f0-9]{2}$/.test(hex)) {
+      bytes.push(Number.parseInt(hex, 16));
+      index += 2;
+      continue;
+    }
+
+    const code = char.charCodeAt(0);
+    if (code <= 0xff) {
+      bytes.push(code);
+    } else {
+      bytes.push(...new TextEncoder().encode(char));
+    }
+  }
+
+  return new Uint8Array(bytes);
+}
+
+function decodeQuotedPrintable(text: string, charset = "utf-8"): string {
+  return decodeBytes(quotedPrintableToBytes(text), charset);
+}
+
+function decodeTransferBody(body: string, encoding: string, charset: string): string {
+  if (encoding === "base64") {
+    try {
+      return decodeBytes(base64ToBytes(body), charset);
+    } catch {
+      return body;
+    }
+  }
+
+  if (encoding === "quoted-printable") {
+    return decodeQuotedPrintable(body, charset);
+  }
+
+  return body;
 }
 
 function stripHtmlTags(text: string): string {
@@ -57,17 +118,9 @@ function extractMailBodies(rawEmail: string): { textBody: string | null; htmlBod
 
       const contentType = headers.match(/Content-Type:\s*([^\r\n;]+)/i)?.[1]?.trim().toLowerCase() ?? "";
       const encoding = headers.match(/Content-Transfer-Encoding:\s*([^\r\n]+)/i)?.[1]?.trim().toLowerCase() ?? "";
+      const charset = headers.match(/charset\s*=\s*"?([^";\r\n]+)"?/i)?.[1]?.trim() ?? "utf-8";
 
-      let decoded = body;
-      if (encoding === "base64") {
-        try {
-          decoded = atob(body.replace(/\s/g, ""));
-        } catch {
-          decoded = body;
-        }
-      } else if (encoding === "quoted-printable") {
-        decoded = decodeQuotedPrintable(body);
-      }
+      const decoded = decodeTransferBody(body, encoding, charset);
 
       if (contentType.includes("text/html") && !htmlBody) {
         htmlBody = decoded.trim();
@@ -83,11 +136,13 @@ function extractMailBodies(rawEmail: string): { textBody: string | null; htmlBod
   }
 
   const htmlMatch = rawEmail.match(/<html[\s\S]*<\/html>/i) ?? rawEmail.match(/<body[\s\S]*<\/body>/i);
-  const htmlBody = htmlMatch ? decodeQuotedPrintable(htmlMatch[0]).trim() : null;
+  const charset = rawEmail.match(/charset\s*=\s*"?([^";\r\n]+)"?/i)?.[1]?.trim() ?? "utf-8";
+  const htmlBody = htmlMatch ? decodeQuotedPrintable(htmlMatch[0], charset).trim() : null;
 
   const splitParts = rawEmail.split(/\r?\n\r?\n/);
   const bodyText = splitParts.length > 1 ? splitParts.slice(1).join("\n\n") : rawEmail;
-  const decodedText = decodeQuotedPrintable(bodyText).trim();
+  const encoding = rawEmail.match(/Content-Transfer-Encoding:\s*([^\r\n]+)/i)?.[1]?.trim().toLowerCase() ?? "";
+  const decodedText = decodeTransferBody(bodyText, encoding, charset).trim();
   const textBody = decodedText ? decodedText : htmlBody ? stripHtmlTags(htmlBody) : null;
 
   return { textBody, htmlBody };
